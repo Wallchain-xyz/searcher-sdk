@@ -1,8 +1,8 @@
 import asyncio
 import datetime
 import logging
-from contextlib import ExitStack
-from typing import Awaitable, Callable, Optional, Set
+from contextlib import AsyncExitStack
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Set
 
 from websockets.client import connect
 
@@ -14,15 +14,7 @@ from searcher_sdk.models import (
     SearcherInfo,
     SearcherInfoWithTraceContext,
 )
-
-try:
-    from opentelemetry import trace
-    from opentelemetry.propagate import extract
-    from opentelemetry.trace import Tracer
-
-    tracer: Optional[Tracer] = trace.get_tracer(__name__)
-except ImportError:
-    tracer = None
+from searcher_sdk.utils import cancel_on_exit
 
 logger = logging.getLogger(__name__)
 
@@ -51,32 +43,59 @@ class AuctionClient:
         self._token = token
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
-        self._bid_maker: Optional[BidMaker] = None
-        self._result_listener: Optional[ResultListener] = None
+        self._connected: bool = False
         self._json_rpc_client = JSONRPCClient()
-        self._json_rpc_client.on_notification("user_transaction")(self._process_lot)
+        self._exit_stack = AsyncExitStack()
+        self._queue: "asyncio.Queue[SearcherInfoWithTraceContext | PingNotReceived]" = (
+            asyncio.Queue()
+        )
 
-    async def _process_lot(self, info: SearcherInfoWithTraceContext) -> None:
-        assert self._bid_maker, "_process_lot() called before listen_lots()"
-        with ExitStack() as stack:
-            if info.trace_data and tracer:
-                trace_ctx = extract(info.trace_data)
-                logger.info(f"Using trace context {trace_ctx}")
-                stack.enter_context(
-                    tracer.start_as_current_span("process_lot", context=trace_ctx)
-                )
-            bid = await self._bid_maker(SearcherInfo(**info.model_dump()))
-            if bid is not None:
-                result = await self._json_rpc_client.send_request(
-                    "make_bid",
-                    MakeBidParam(
-                        lot_id=info.lot_id,
-                        searcher_request=bid.searcher_request,
-                        searcher_signature=bid.searcher_signature,
-                    ),
-                )
-                if self._result_listener:
-                    await self._result_listener(MakeBidResult(**result))
+    async def listen_lots(
+        self, bid_maker: BidMaker, result_listener: Optional[ResultListener] = None
+    ) -> None:
+        async with self:  # Connect, no-op if already connected
+            async for info in self.listen_as_iter():
+                await self._process_info(info, bid_maker, result_listener)
+
+    async def make_bid(self, lot_id: str, bid: BidData) -> MakeBidResult:
+        res = await self._json_rpc_client.send_request(
+            "make_bid",
+            MakeBidParam(
+                lot_id=lot_id,
+                searcher_request=bid.searcher_request,
+                searcher_signature=bid.searcher_signature,
+            ),
+        )
+        return MakeBidResult(**res)
+
+    async def listen_as_iter(self) -> AsyncIterator[SearcherInfoWithTraceContext]:
+        while True:
+            item = await self._queue.get()
+            if isinstance(item, PingNotReceived):
+                raise item
+            yield item
+
+    async def __aenter__(self) -> "AuctionClient":
+        if not self._connected:
+            self._json_rpc_client = JSONRPCClient()
+            self._exit_stack = AsyncExitStack()
+            self._queue = asyncio.Queue()
+
+            self._json_rpc_client.on_notification("user_transaction")(self._process_lot)
+            await self._exit_stack.__aenter__()
+            ws = await self._exit_stack.enter_async_context(
+                connect(self._url + f"/broadcaster/listen?token={self._token}")
+            )
+            await self._exit_stack.enter_async_context(self._json_rpc_client.listen(ws))
+            await self._exit_stack.enter_async_context(
+                cancel_on_exit(self._ping_loop())
+            )
+            self._connected = True
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self._exit_stack.__aexit__(*args)
+        self._connected = False
 
     async def _ping_loop(self) -> None:
         while True:
@@ -86,21 +105,33 @@ class AuctionClient:
                     timeout=self._ping_timeout.total_seconds(),
                 )
             except asyncio.TimeoutError:
-                raise PingNotReceived(
-                    f"Broken connection: did not received ping in "
-                    f"{self._ping_timeout.total_seconds()} seconds"
+                await self._queue.put(
+                    PingNotReceived(
+                        f"Broken connection: did not received ping in "
+                        f"{self._ping_timeout.total_seconds()} seconds"
+                    )
                 )
+                return
             if res != "pong":
                 logger.warning(f"Wrong ping response: {res}")
             await asyncio.sleep(self._ping_interval.total_seconds())
 
-    async def listen_lots(
-        self, bid_maker: BidMaker, result_listener: Optional[ResultListener] = None
+    async def _process_lot(self, info: SearcherInfoWithTraceContext) -> None:
+        await self._queue.put(info)
+
+    async def _process_info(
+        self,
+        info: SearcherInfoWithTraceContext,
+        bid_maker: BidMaker,
+        result_listener: Optional[ResultListener] = None,
     ) -> None:
-        self._bid_maker = bid_maker
-        self._result_listener = result_listener
-        async with connect(
-            self._url + f"/broadcaster/listen?token={self._token}"
-        ) as ws:
-            async with self._json_rpc_client.listen(ws):
-                await self._ping_loop()
+        try:
+            with info.enter_context_maybe():
+                bid = await bid_maker(SearcherInfo(**info.model_dump()))
+                if bid is None:
+                    return
+                result = await self.make_bid(info.lot_id, bid)
+                if result_listener:
+                    await result_listener(result)
+        except Exception:
+            logger.exception("Failed to process searcher info")

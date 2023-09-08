@@ -7,6 +7,7 @@ from polyfactory.factories.pydantic_factory import ModelFactory
 from pydantic import BaseModel
 
 from searcher_sdk import BidData, SearcherInfo
+from searcher_sdk.models import SwapInfo
 
 
 async def wait_for_condition(
@@ -42,3 +43,7 @@ class SearcherInfoFactory(CustomModelFactory[SearcherInfo]):
 
 class BidDataFactory(CustomModelFactory[BidData]):
     __model__ = BidData
+
+
+class SwapInfoFactory(CustomModelFactory[SwapInfo]):
+    __model__ = SwapInfo

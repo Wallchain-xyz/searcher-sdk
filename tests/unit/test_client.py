@@ -17,7 +17,12 @@ from searcher_sdk import AuctionClient, BidData, SearcherInfo, SearcherRequest
 from searcher_sdk.client import PingNotReceived
 from searcher_sdk.utils import cancel_on_exit
 
-from tests.helpers import BidDataFactory, SearcherInfoFactory, wait_for_condition
+from tests.helpers import (
+    BidDataFactory,
+    SearcherInfoFactory,
+    SwapInfoFactory,
+    wait_for_condition,
+)
 
 
 class Server(uvicorn.Server):
@@ -90,14 +95,52 @@ def fake_server() -> Iterator[MockAuctionServer]:
         yield server
 
 
-async def test_lots_received(fake_server: MockAuctionServer) -> None:
+@pytest.fixture()
+def info() -> SearcherInfo:
+    return SearcherInfoFactory.build(
+        min_deadline=1000,
+        swap_info=SwapInfoFactory.build(),
+    )
+
+
+@pytest.fixture()
+def info_without_min_deadline() -> SearcherInfo:
+    return SearcherInfoFactory.build(min_deadline=None)
+
+
+@pytest.fixture()
+def info_without_swap_info() -> SearcherInfo:
+    return SearcherInfoFactory.build(swap_info=None)
+
+
+@pytest.fixture(
+    params=[
+        "info",
+        "info_without_min_deadline",
+        "info_without_swap_info",
+    ]
+)
+def any_info(
+    request: Any,
+) -> SearcherInfo:
+    return request.getfixturevalue(request.param)
+
+
+def info_to_params(info: SearcherInfo) -> Dict[str, Any]:
+    raw = info.model_dump(by_alias=True, mode="json")
+    if info.min_deadline is None:
+        raw.pop("minDeadline")
+    if info.swap_info is None:
+        raw.pop("swapInfo")
+    return raw
+
+
+async def test_lots_received(
+    fake_server: MockAuctionServer, any_info: SearcherInfo
+) -> None:
     # Arrange
-    info: SearcherInfo = SearcherInfoFactory.build()
     fake_server.send_queue.put_nowait(
-        {
-            "method": "user_transaction",
-            "params": info.model_dump(),
-        }
+        {"method": "user_transaction", "params": info_to_params(any_info)}
     )
 
     async def make_bid(info_received: SearcherInfo) -> None:
@@ -111,18 +154,14 @@ async def test_lots_received(fake_server: MockAuctionServer) -> None:
         await wait_for_condition(lambda: bool(infos_received))
 
     # Assert
-    assert info in infos_received
+    assert any_info in infos_received
 
 
-async def test_bid_sent(fake_server: MockAuctionServer) -> None:
+async def test_bid_sent(fake_server: MockAuctionServer, info: SearcherInfo) -> None:
     # Arrange
-    info: SearcherInfo = SearcherInfoFactory.build()
     bid: BidData = BidDataFactory.build()
     fake_server.send_queue.put_nowait(
-        {
-            "method": "user_transaction",
-            "params": info.model_dump(),
-        }
+        {"method": "user_transaction", "params": info_to_params(info)}
     )
 
     async def make_bid(_: SearcherInfo) -> BidData:
@@ -141,14 +180,14 @@ async def test_bid_sent(fake_server: MockAuctionServer) -> None:
         mess["params"] for mess in fake_server.received if mess["method"] == "make_bid"
     )
 
-    assert info.lot_id == message_raw["lot_id"]
-    assert message_raw["searcher_request"]["nonce"] == hex(bid.searcher_request.nonce)
-    assert message_raw["searcher_request"]["bid"] == hex(bid.searcher_request.bid)
-    assert message_raw["searcher_request"]["maxGasPrice"] == hex(
+    assert info.lot_id == message_raw["lotId"]
+    assert message_raw["searcherRequest"]["nonce"] == hex(bid.searcher_request.nonce)
+    assert message_raw["searcherRequest"]["bid"] == hex(bid.searcher_request.bid)
+    assert message_raw["searcherRequest"]["maxGasPrice"] == hex(
         bid.searcher_request.max_gas_price
     )
-    assert bid.searcher_request == SearcherRequest(**message_raw["searcher_request"])
-    assert bid.searcher_signature == message_raw["searcher_signature"]
+    assert bid.searcher_request == SearcherRequest(**message_raw["searcherRequest"])
+    assert bid.searcher_signature == message_raw["searcherSignature"]
 
 
 async def test_ping_pong(fake_server: MockAuctionServer) -> None:

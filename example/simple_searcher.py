@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import click
+from eth_utils import denoms
 
 from searcher_sdk import (
     BaseSearcherConfig,
@@ -36,19 +37,27 @@ class SimpleSearcher(CLISearcher[SimpleSearcherConfig]):
     async def _make_searcher_request(
         self, info: SearcherInfo
     ) -> Optional[SearcherRequest]:
+        bid = 1 * denoms.milli
         return SearcherRequest(
+            to=self._config.contract_address,  # Address of searchers contract
             data=(
-                # This is hardcoded data to send 10**10 bid, TODO: un-hardcode it
-                "0xfe0d94c1000000000000000000000000000"
-                "00000000000000000000000000002540be400"
+                # Encoded calldata for searchers contract,
+                f"0xfe0d94c1"
+                + f"{bid:0>64x}"  # function selector + bid size
             ),
-            bid=10**10,
-            to=self._config.contract_address,
-            user_call_hash=user_tx_hash(info),
-            deadline=int((datetime.now() + timedelta(seconds=30)).timestamp()),
-            gas=1_000_000,
-            max_gas_price=5 * 10**9,
-            nonce=secrets.randbits(256),
+            bid=bid,  # Amount of WETH (wrapped native token) you pay
+            user_call_hash=user_tx_hash(
+                info
+            ),  # Hash of user transaction for searchers safety
+            deadline=(  # Timestamp, time until this searcher request is valid
+                info.min_deadline
+                or int((datetime.now() + timedelta(seconds=30)).timestamp())
+            ),
+            gas=1_000_000,  # Amount of gas searcher contract may use
+            max_gas_price=5 * denoms.gwei,  # Max price searcher contract accepts.
+            nonce=secrets.randbits(
+                256
+            ),  # A random number to protect from replay attacks
         )
 
 

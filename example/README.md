@@ -11,15 +11,15 @@ Searcher consists of:
 
 ## Running the code
 
-To run this code, you'll need to pass following parameters to the script:
+To run this example, you'll need to pass following parameters to the script:
 
-| Parameter name     | Description                                                                              |
-|--------------------|------------------------------------------------------------------------------------------|
-| --auction-url      | Base websocket url of the Wallchain auction. Should be something like ws://hostname      |
-| --auction-token    | Authorization token for auction API                                                      |
-| --capsule-address  | Address of Wallchain's capsule address, used to generate signatures                      |
-| --contract-address | Address of searcher's contract                                                           |
-| --private-key-hex  | PPrivate key for searcher contract owner address. Used to sign SearcherRequest structure |
+| Parameter name     | Description                                                                             |
+|--------------------|-----------------------------------------------------------------------------------------|
+| --auction-url      | Base websocket url of the Wallchain auction. Should be something like ws://hostname     |
+| --auction-token    | Authorization token for auction API                                                     |
+| --capsule-address  | Address of Wallchain's capsule address, used to generate signatures                     |
+| --contract-address | Address of searcher's contract                                                          |
+| --private-key-hex  | Private key for searcher contract owner address. Used to sign SearcherRequest structure |
 
 For example:
 ```bash
@@ -30,7 +30,6 @@ For example:
    --capsule-address 0xB6bf0e1798c0A7cDC6caF3a6b64e43a2d3e3aC3E \
    --private-key-hex 0x0000000000000000000000000000000000000000000000000000000000000000
 ```
-
 ## How to adapt for you use-case
 
 ### Contract
@@ -43,12 +42,19 @@ validation.
 As your contract have to pay the price of gas it uses, you should make sure it has enough
 native coin. You do not need to add any additional code here, as logic is in `SearcherBase`.
 
-### Listener
+### Listener (python-sdk)
 
 If you plan to use python for listener, you can base your code on `simple_searcher.py`.
 If you do not want to use/do not like default CLI interface, you can use
 `AuctionClient` class and `sign_searcher_request`, `user_tx_hash` helper functions
 directly.
+
+Your logic should generate and pass `SearcherRequest` object. Check the
+comments in `simple_searcher.py` for descriptions of all fields. Note that:
+- there is a minimal size of the bid, equal to **0.001 WBNB** for BSC chain.
+- `SearcherRequest.deadline` should bid greater or equal then `SearcherInfo.min_deadline`
+
+### Listener (websocket + jsonrpc)
 
 If you are going to use different programming language, you'll have to implement listener
 yourself. Below is core information you'll need:
@@ -67,7 +73,7 @@ After connection is opened, server will immediately start to send json-rpc notif
   "jsonrpc": "2.0",
   "method": "user_transaction",
   "params": {
-    "lot_id": "id of lot to send back when making bid",
+    "lotId": "55f5af890bb58b09254df8049301ab687b0ee9ab",
     "txn": {
       "from": "0x0000000000000000000000000000000000000000",
       "to": "0x0000000000000000000000000000000000000000",
@@ -91,13 +97,27 @@ After connection is opened, server will immediately start to send json-rpc notif
         ],
         "data": "0x0000000000000000000000000000000000000000000000000000000000000000"
       }
-    ]
+    ],
+    "minDeadline": 1693577243,
+    "swapInfo": {
+      "tokenIn":  "0x0000000000000000000000000000000000000000",
+      "tokenOut":  "0x0000000000000000000000000000000000000000",
+      "amountIn": "0x42",
+      "nativeIn":  false
+    }
   }
 }
 ```
 
-Here `params.txn` is information about user transaction,
-and `params.logs` is result that collected by simulating this transaction.
+Here:
+ - `params.lotId` is identifier of user transaction. It is used to match bids with auction lots.
+ - `params.txn` is information about user transaction.
+ - `params.logs` is result that collected by simulating this transaction.
+ - `params.minDeadline` is timestamp, minimal deadline your bid should be valid. You
+   should set `searcherRequest.deadline` to be greate or equal to this value.
+   Note that this value is optional and can be missing in incoming notification.
+ - `params.swapInfo` is information about swap that is represented by user transaction.
+   Note that this value is optional and can be missing in incoming notification.
 
 After receiving such notification, you can execute your MEV searching logic.
 If you found MEV and want to submit a bid, you should send json-rpc request
@@ -109,24 +129,39 @@ with method `make_bid`:
   "id": "id to track response",
   "method": "make_bid",
   "params": {
-    "lot_id": "id of lot from user_transaction notification",
-    "searcher_request": {
-      "to": "hex address of searcher contract",
-      "data": "calldata for searcher contract, as hex bytes",
-      "gas": "amount of gas your contract may use, as int",
-      "nonce": "random 256 bit number to prevent replay attacks on you, as hex",
-      "bid": "amount of WETH you bid, e.g. willing to pay back, as hex",
-      "user_call_hash": "hash of user transaction, as hex bytes",
-      "max_gas_price": "max price per gas you are willing to pay, as hex",
-      "deadline": "timestamp when your bid becomes invalid, as int"
+    "lotId": "55f5af890bb58b09254df8049301ab687b0ee9ab",
+    "searcherRequest": {
+      "to": "0xEc730115C0D65ABfCc89642BcdabCAcD7E0E788C",
+      "data": "0xfe0d94c100000000000000000000000000000000000000000000000000038d7ea4c68000",
+      "gas": 1000000,
+      "nonce": "0x4fb55a2cdc3dd31a55da10c6a2682b49fffb218558f3a2ad1fc1f2b7bec5a1fb",
+      "bid": "0x38d7ea4c68000",
+      "userCallHash": "0xcf1fd903ea8f7ce96a39f38016baa43419564872a92c8b6a22a0812637c41780",
+      "maxGasPrice": "0x2540be400",
+      "deadline": 1693577243
     },
-    "searcher_signature": "signature of searcher_request, as hex bytes"
+    "searcherSignature": "0xb56963509a1b3e49ea1643686cb8cb6ec14ded8d7d8ddbaf53c04b86a324b10d2e0f7bdb5adb8a7a4449629b3bf1d30526b5ba275d620358a0630743b7cf8ed01c"
   }
 }
 ```
 
+Here:
+ - `params.lotId` is identifier of user transaction. It is used to match bids with auction lots.
+ - `params.searcherRequest.to` hex address of searcher contract
+ - `params.searcherRequest.data` calldata for searcher contract, as hex bytes
+ - `params.searcherRequest.gas` amount of gas your contract may use, as int. Your contract should have
+   enough native token to pre-pay this amount of gas.
+ - `params.searcherRequest.nonce` random 256 bit number to prevent replay attacks on you, as hex
+ - `params.searcherRequest.bid` amount of WETH (wrapped native token) you bid,
+                                 e.g. willing to pay back, as hex. Note that there
+                                 are a **minimal** bid size. For BSC chain it is **0.001 WBNB**.
+ - `params.searcherRequest.userCallHash` hash of user transaction, as hex bytes
+ - `params.searcherRequest.maxGasPrice` max price per gas you are willing to pay, as hex
+ - `params.searcherRequest.deadline` timestamp when your bid becomes invalid, as int
+ - `params.searcherSignature` signature of searcher_request, as hex bytes
+
 Please refer to python implementation to see exact logic how to calculate
-`params.searcher_request.user_call_hash`, `params.searcher_signature`.
+`params.searcherRequest.userCallHash`, `params.searcherSignature`.
 
 As json-rpc response, you are getting result of your bid verification:
 
@@ -136,16 +171,17 @@ As json-rpc response, you are getting result of your bid verification:
   "id": "id to track response",
   "method": "make_bid",
   "result": {
-    "verification_result": {
+    "verificationResult": {
       "verified": true,
-      "error_reason": null,
-      "error_debug_info": null
+      "errorReason": null,
+      "errorDebugInfo": null
     }
   }
 }
 ```
 
-If verification fails, field `result.verification_result.error_reason` will contain
-short description of a problem, and `result.verification_result.error_debug_info` will contain
-complete result of `debug_traceCall` with `callTracer`
+Here:
+- `result.verificationResult.verified` flag, `true` if verification of bid was successful
+- `result.verificationResult.errorReason` short description of problem if verification fails, otherwise `null`
+- `result.verificationResult.errorDebugInfo` complete result of `debug_traceCall` with `callTracer`
 ([check format in Geth docs](https://geth.ethereum.org/docs/developers/evm-tracing/built-in-tracers#call-tracer)).

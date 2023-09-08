@@ -1,7 +1,6 @@
 import abc
 import asyncio
 import logging
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Generic, Optional, Sequence, Type, TypeVar
 
@@ -10,7 +9,6 @@ import click
 from searcher_sdk.client import AuctionClient
 from searcher_sdk.models import (
     BidData,
-    MakeBidResult,
     SearcherInfo,
     SearcherRequest,
     SignatureDomainInfo,
@@ -36,13 +34,17 @@ class CLISearcher(abc.ABC, Generic[CONFIG]):
     ] = ()
     config_class: Type[CONFIG]
 
-    def __init__(self, client: AuctionClient, config: CONFIG) -> None:
+    def __init__(
+        self,
+        client: AuctionClient,
+        config: CONFIG,
+        max_reconnects: int,
+        reconnect_timeout: int,
+    ) -> None:
         self._client = client
         self._config = config
-
-    async def run_forever(self) -> None:
-        logger.info("Starting listening for lots indefinitely")
-        await self._client.listen_lots(self._make_bid, self._process_bid_result)
+        self._max_reconnects = max_reconnects
+        self._reconnect_timeout = reconnect_timeout
 
     @abc.abstractmethod
     async def _make_searcher_request(
@@ -50,21 +52,39 @@ class CLISearcher(abc.ABC, Generic[CONFIG]):
     ) -> Optional[SearcherRequest]:
         pass
 
-    async def _make_bid(self, info: SearcherInfo) -> Optional[BidData]:
+    async def _run_with_retries(self) -> None:
+        for i in range(self._max_reconnects):
+            try:
+                await self.run_forever()
+            except Exception as e:
+                logger.exception(e)
+            logger.warning(
+                f"Used {i + 1} connect tries. "
+                f"Reconnecting in {self._reconnect_timeout} seconds"
+            )
+            await asyncio.sleep(self._reconnect_timeout)
+
+    async def run_forever(self) -> None:
+        logger.info("Starting listening for lots indefinitely")
+        async with self._client:
+            async for info in self._client.listen_as_iter():
+                with info.enter_context_maybe():
+                    await self._on_searcher_info(info)
+
+    async def _on_searcher_info(self, info: SearcherInfo) -> None:
         logger.info(f"Got lot: {info}")
         request = await self._make_searcher_request(info)
-        if request:
-            return BidData(
-                searcher_request=request,
-                searcher_signature=sign_searcher_request(
-                    request=request,
-                    domain_info=self._config.domain_info,
-                    private_key_hex=self._config.private_key_hex,
-                ),
-            )
-        return None
-
-    async def _process_bid_result(self, result: MakeBidResult) -> None:
+        if request is None:
+            return
+        bid_data = BidData(
+            searcher_request=request,
+            searcher_signature=sign_searcher_request(
+                request=request,
+                domain_info=self._config.domain_info,
+                private_key_hex=self._config.private_key_hex,
+            ),
+        )
+        result = await self._client.make_bid(info.lot_id, bid_data)
         logger.info(f"Got make bid result: {result}")
 
     @classmethod
@@ -167,19 +187,11 @@ class CLISearcher(abc.ABC, Generic[CONFIG]):
                     private_key_hex=private_key_hex,
                     **kwargs,
                 ),
+                max_reconnects=max_reconnects,
+                reconnect_timeout=reconnect_timeout,
             )
 
-            event_loop = asyncio.get_event_loop()
-            for i in range(max_reconnects):
-                try:
-                    event_loop.run_until_complete(searcher.run_forever())
-                except Exception as e:
-                    logger.exception(e)
-                logger.warning(
-                    f"Used {i + 1} connect tries. "
-                    f"Reconnecting in {reconnect_timeout} seconds"
-                )
-                time.sleep(reconnect_timeout)
+            asyncio.run(searcher._run_with_retries())
 
         for additional_option in cls.additional_click_options:
             start_searcher = additional_option(start_searcher)
