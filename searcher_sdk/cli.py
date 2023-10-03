@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Generic, Optional, Sequence, Type, TypeVar
 
 import click
+from websockets.exceptions import ConnectionClosed
 
 from searcher_sdk.client import AuctionClient
 from searcher_sdk.models import (
     BidData,
     SearcherInfo,
+    SearcherInfoWithTraceContext,
     SearcherRequest,
     SignatureDomainInfo,
 )
@@ -68,8 +70,18 @@ class CLISearcher(abc.ABC, Generic[CONFIG]):
         logger.info("Starting listening for lots indefinitely")
         async with self._client:
             async for info in self._client.listen_as_iter():
-                with info.enter_context_maybe():
-                    await self._on_searcher_info(info)
+                asyncio.create_task(self._on_searcher_info_wrapper(info))
+
+    async def _on_searcher_info_wrapper(
+        self, info: SearcherInfoWithTraceContext
+    ) -> None:
+        try:
+            with info.enter_context_maybe():
+                await self._on_searcher_info(info)
+        except ConnectionClosed:
+            logger.warning("WS connection was lost, will try to reconnect")
+        except Exception as e:
+            logger.exception(e)
 
     async def _on_searcher_info(self, info: SearcherInfo) -> None:
         logger.info(f"Got lot: {info}")

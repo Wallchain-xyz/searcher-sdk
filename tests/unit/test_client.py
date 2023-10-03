@@ -12,6 +12,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from starlette.websockets import WebSocketDisconnect
+from websockets.exceptions import ConnectionClosed
 
 from searcher_sdk import AuctionClient, BidData, SearcherInfo, SearcherRequest
 from searcher_sdk.client import PingNotReceived
@@ -54,6 +55,7 @@ class MockAuctionServer:
     url: str
     received: List[Dict[str, Any]]
     send_queue: Queue  # type: ignore
+    force_disconnect: bool = False
 
 
 @pytest.fixture
@@ -84,6 +86,8 @@ def fake_server() -> Iterator[MockAuctionServer]:
         async with cancel_on_exit(_sender()):
             try:
                 while True:
+                    if server.force_disconnect:
+                        return
                     message = await websocket.receive_json()
                     server.received.append(message)
             except WebSocketDisconnect:
@@ -228,3 +232,29 @@ async def test_ping_pong_auto_disconnect(fake_server: MockAuctionServer) -> None
     # Act
     with pytest.raises(PingNotReceived):
         await asyncio.wait_for(client.listen_lots(make_bid), timeout=1)
+
+
+async def test_ping_pong_connection_lost(fake_server: MockAuctionServer) -> None:
+    # Arrange
+    async def make_bid(_: SearcherInfo) -> None:
+        pass
+
+    client = AuctionClient(
+        fake_server.url,
+        "token",
+        ping_interval=datetime.timedelta(seconds=0.1),
+        ping_timeout=datetime.timedelta(seconds=0.1),
+    )
+
+    # Act
+    with pytest.raises((PingNotReceived, ConnectionClosed)):
+        async with cancel_on_exit(client.listen_lots(make_bid)) as task:
+            assert await wait_for_condition(lambda: bool(fake_server.received))
+            fake_server.force_disconnect = True
+            fake_server.send_queue.put_nowait(
+                {
+                    "id": fake_server.received[0]["id"],
+                    "result": "pong",
+                }
+            )
+            assert await wait_for_condition(lambda: task.done(), timeout=2)

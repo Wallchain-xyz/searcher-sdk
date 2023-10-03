@@ -62,6 +62,12 @@ class SimpleSearcher(CLISearcher[SimpleSearcherConfig]):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format=(
+            "%(asctime)s %(levelname).1s [%(process)d] "
+            "l=%(name)s %(funcName)s() L%(lineno)-4d %(message)s"
+        ),
+    )
 
     SimpleSearcher.cli_entrypoint()

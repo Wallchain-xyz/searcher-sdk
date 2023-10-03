@@ -94,22 +94,31 @@ class AuctionClient:
         return self
 
     async def __aexit__(self, *args: Any) -> None:
-        await self._exit_stack.__aexit__(*args)
-        self._connected = False
+        try:
+            await self._exit_stack.__aexit__(*args)
+        finally:
+            self._connected = False
 
     async def _ping_loop(self) -> None:
         while True:
             try:
+                logger.info("Sending ping")
                 res = await asyncio.wait_for(
                     self._json_rpc_client.send_request("ping"),
                     timeout=self._ping_timeout.total_seconds(),
                 )
+                logger.info("Got pong")
             except asyncio.TimeoutError:
                 await self._queue.put(
                     PingNotReceived(
                         f"Broken connection: did not received ping in "
                         f"{self._ping_timeout.total_seconds()} seconds"
                     )
+                )
+                return
+            except Exception:
+                await self._queue.put(
+                    PingNotReceived(f"Broken connection: failed to send ping")
                 )
                 return
             if res != "pong":

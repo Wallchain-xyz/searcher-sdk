@@ -98,11 +98,13 @@ def _get_domain_hash(domain_info: SignatureDomainInfo) -> bytes:
 
 
 @asynccontextmanager
-async def cancel_on_exit(coro: Coroutine[Any, Any, Any]) -> AsyncIterator[None]:
+async def cancel_on_exit(
+    coro: Coroutine[Any, Any, Any], timeout_sec: float = 5
+) -> AsyncIterator["asyncio.Task[Any]"]:
     task = asyncio.create_task(coro)
     try:
-        yield
+        yield task
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=timeout_sec)

@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import enum
 import inspect
 import logging as L
@@ -96,10 +97,13 @@ class RpcMethod(BaseModel):
 
 
 class JSONRPCClient:
-    def __init__(self) -> None:
+    def __init__(
+        self, response_timeout: datetime.timedelta = datetime.timedelta(seconds=10)
+    ) -> None:
         self._ws: Optional[WebSocketClientProtocol] = None
         self._res_futures: Dict[IdType, "asyncio.Future[Any]"] = {}
         self._notification_listeners: Dict[str, List[RpcMethod]] = defaultdict(list)
+        self._response_timeout = response_timeout
 
     def on_notification(self, method: str) -> Callable[[Any], Any]:
         def register(listener: Any) -> Any:
@@ -125,7 +129,9 @@ class JSONRPCClient:
         future: "asyncio.Future[Any]" = asyncio.Future()
         self._res_futures[req_id] = future
         await self._ws.send(req.model_dump_json(by_alias=True))
-        result = await future
+        result = await asyncio.wait_for(
+            future, timeout=self._response_timeout.total_seconds()
+        )
         return result
 
     @asynccontextmanager
@@ -137,7 +143,16 @@ class JSONRPCClient:
     async def _listen_incoming(self) -> None:
         assert self._ws, "listen() should be called before using send_request"
         while True:
-            raw = await self._ws.recv()
+            try:
+                raw = await self._ws.recv()
+            except Exception as e:
+                # Fail all futures for pending requests, as they
+                # will never receive response
+                for key, future in list(self._res_futures.items()):
+                    if not future.done():
+                        self._res_futures.pop(key)
+                        future.set_exception(e)
+                raise e
             if raw is None:
                 continue
             asyncio.create_task(self._handle_raw_message(raw))
