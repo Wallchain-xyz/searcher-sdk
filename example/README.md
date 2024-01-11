@@ -27,7 +27,7 @@ For example:
    --auction-url ws://domain-of-auction \
    --auction-token <my-token> \
    --contract-address 0x0000000000000000000000000000000000000000 \
-   --capsule-address 0xB6bf0e1798c0A7cDC6caF3a6b64e43a2d3e3aC3E \
+   --capsule-address 0xc0ffee01d5c99f76f5b86d9e7694017742f3ce94 \
    --private-key-hex 0x0000000000000000000000000000000000000000000000000000000000000000
 ```
 ## How to adapt for you use-case
